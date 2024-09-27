@@ -1,6 +1,5 @@
 import json
 import os
-from datetime import datetime
 from urllib.parse import urlencode
 
 from curl_cffi import requests
@@ -23,34 +22,32 @@ treament = [
 
 
 def Search_all(
-    check_in: str,
-    check_out: str,
-    ne_lat: float,
-    ne_long: float,
-    sw_lat: float,
-    sw_long: float,
-    zoom_value: int,
+    search_url_params: dict,
+    location_query: str,
     currency: str,
     proxy_url: str,
+    use_cache: bool = True,
+    standardize_results: bool = False,
 ):
     api_key = api.get(proxy_url)
     all_results = []
     cursor = ""
+    prev_cursor = ""
     while True:
-        results_raw = search(
-            check_in,
-            check_out,
-            ne_lat,
-            ne_long,
-            sw_lat,
-            sw_long,
-            zoom_value,
+        results_raw = search_cached(
+            search_url_params,
+            location_query,
             cursor,
             currency,
             api_key,
             proxy_url,
+            use_cache,
         )
-        results = standardize_search(results_raw.get("searchResults", []))
+        results = (
+            standardize_search(results_raw.get("searchResults", []))
+            if standardize_results
+            else results_raw.get("searchResults", [])
+        )
         all_results = all_results + results
         if (
             len(results) == 0
@@ -58,7 +55,10 @@ def Search_all(
             or results_raw["paginationInfo"]["nextPageCursor"] is None
         ):
             break
+        prev_cursor = cursor
         cursor = results_raw["paginationInfo"]["nextPageCursor"]
+        if cursor == prev_cursor:
+            break
     return all_results
 
 
@@ -92,91 +92,150 @@ def Search_first_page(
     return results
 
 
+def search_cached(
+    search_url_params: dict,
+    location_query: str,
+    cursor: str,
+    currency: str,
+    api_key: str,
+    proxy_url: str,
+    use_cache: bool = True,
+):
+    cache_key = "_".join(
+        [
+            search_url_params.get("checkin"),
+            search_url_params.get("checkout"),
+            location_query.replace(" ", "-"),
+            cursor,
+        ]
+    )
+    cache_fp = f"{CACHE_DIR}/{cache_key}.json"
+    if use_cache and os.path.exists(cache_fp):
+        print(f"Cache hit for {cache_key}")
+        with open(cache_fp, "r") as f:
+            return json.load(f)
+    else:
+        print(f"Requesting {cache_key}")
+        results_raw = search(
+            search_url_params, location_query, cursor, currency, api_key, proxy_url
+        )
+        with open(cache_fp, "w") as f:
+            json.dump(results_raw, f)
+        return results_raw
+
+
 def search(
-    check_in: str,
-    check_out: str,
-    ne_lat: float,
-    ne_long: float,
-    sw_lat: float,
-    sw_long: float,
-    zoom_value: int,
+    search_url_params: dict,
+    location_query: str,
     cursor: str,
     currency: str,
     api_key: str,
     proxy_url: str,
 ):
-    check_in_date = datetime.strptime(check_in, "%Y-%m-%d")
-    check_out_date = datetime.strptime(check_out, "%Y-%m-%d")
-
-    difference = check_out_date - check_in_date
-
-    days = difference.days
-
-    base_url = "https://www.airbnb.com/api/v3/StaysSearch/d4d9503616dc72ab220ed8dcf17f166816dccb2593e7b4625c91c3fce3a3b3d6"
+    base_url = "https://www.airbnb.com/api/v3/StaysSearch/385c60ba2599dad1c62355032d8bbc09d826ae11660be78b16e09eba49c5c605"
     query_params = {
         "operationName": "StaysSearch",
         "locale": "en",
         "currency": currency,
     }
     url_parsed = f"{base_url}?{urlencode(query_params)}"
-    rawParams = [
-        {"filterName": "cdnCacheSafe", "filterValues": ["false"]},
-        {"filterName": "channel", "filterValues": ["EXPLORE"]},
-        {"filterName": "checkin", "filterValues": [check_in]},
-        {"filterName": "checkout", "filterValues": [check_out]},
-        {"filterName": "datePickerType", "filterValues": ["calendar"]},
-        {"filterName": "flexibleTripLengths", "filterValues": ["one_week"]},
-        {
-            "filterName": "itemsPerGrid",
-            "filterValues": ["50"],
-        },  # if you read this, this is items returned number, this can bex exploited  ;)
-        {"filterName": "monthlyLength", "filterValues": ["3"]},
-        {"filterName": "monthlyStartDate", "filterValues": ["2024-02-01"]},
-        {"filterName": "neLat", "filterValues": [str(ne_lat)]},
-        {"filterName": "neLng", "filterValues": [str(ne_long)]},
-        {"filterName": "placeId", "filterValues": ["ChIJpTeBx6wjq5oROJeXkPCSSSo"]},
-        {"filterName": "priceFilterInputType", "filterValues": ["0"]},
-        {"filterName": "priceFilterNumNights", "filterValues": [str(days)]},
-        {"filterName": "query", "filterValues": ["Galapagos Island, Ecuador"]},
-        {"filterName": "screenSize", "filterValues": ["large"]},
-        {"filterName": "refinementPaths", "filterValues": ["/homes"]},
-        {"filterName": "searchByMap", "filterValues": ["true"]},
-        {"filterName": "swLat", "filterValues": [str(sw_lat)]},
-        {"filterName": "swLng", "filterValues": [str(sw_long)]},
-        {"filterName": "tabId", "filterValues": ["home_tab"]},
-        {"filterName": "version", "filterValues": ["1.8.3"]},
-        {"filterName": "zoomLevel", "filterValues": [str(zoom_value)]},
-    ]
+
     inputData = {
         "operationName": "StaysSearch",
+        "variables": {
+            "staysSearchRequest": {
+                "requestedPageType": "STAYS_SEARCH",
+                "cursor": cursor,
+                "metadataOnly": False,
+                "source": "structured_search_input_header",
+                "searchType": "autocomplete_click",
+                "treatmentFlags": [
+                    "feed_map_decouple_m11_treatment",
+                    "stays_search_rehydration_treatment_desktop",
+                    "stays_search_rehydration_treatment_moweb",
+                    "m1_2024_monthly_stays_dial_treatment_flag",
+                    "recommended_amenities_2024_treatment_b",
+                    "filter_redesign_2024_treatment",
+                    "filter_reordering_2024_roomtype_treatment",
+                ],
+                "rawParams": [
+                    {
+                        "filterName": "adults",
+                        "filterValues": [search_url_params.get("adults", "1")],
+                    },
+                    {"filterName": "cdnCacheSafe", "filterValues": ["false"]},
+                    {"filterName": "channel", "filterValues": ["EXPLORE"]},
+                    {
+                        "filterName": "checkin",
+                        "filterValues": [search_url_params.get("checkin")],
+                    },
+                    {
+                        "filterName": "checkout",
+                        "filterValues": [search_url_params.get("checkout")],
+                    },
+                    {
+                        "filterName": "datePickerType",
+                        "filterValues": [
+                            search_url_params.get("date_picker_type", "calendar")
+                        ],
+                    },
+                    {
+                        "filterName": "federatedSearchSessionId",
+                        "filterValues": ["2edae9ee-8b90-4f6f-8ae4-15564d1e198c"],
+                    },
+                    {"filterName": "flexibleTripLengths", "filterValues": ["one_week"]},
+                    {"filterName": "itemsPerGrid", "filterValues": ["18"]},
+                    {"filterName": "monthlyEndDate", "filterValues": ["2025-01-01"]},
+                    {"filterName": "monthlyLength", "filterValues": ["3"]},
+                    {"filterName": "monthlyStartDate", "filterValues": ["2024-10-01"]},
+                    {
+                        "filterName": "placeId",
+                        "filterValues": [search_url_params.get("place_id")],
+                    },
+                    {"filterName": "priceFilterInputType", "filterValues": ["2"]},
+                    {"filterName": "priceFilterNumNights", "filterValues": ["15"]},
+                    {
+                        "filterName": "query",
+                        "filterValues": ["Chelsea, London, United Kingdom"],
+                    },
+                    {
+                        "filterName": "refinementPaths",
+                        "filterValues": search_url_params.get(
+                            "refinement_paths", ["/homes"]
+                        ),
+                    },
+                    {"filterName": "screenSize", "filterValues": ["large"]},
+                    {"filterName": "searchMode", "filterValues": ["regular_search"]},
+                    {"filterName": "tabId", "filterValues": ["home_tab"]},
+                    {"filterName": "version", "filterValues": ["1.8.3"]},
+                    {
+                        "filterName": "children",
+                        "filterValues": [search_url_params.get("children", "0")],
+                    },
+                    {
+                        "filterName": "infants",
+                        "filterValues": [search_url_params.get("infants", "0")],
+                    },
+                    {
+                        "filterName": "pets",
+                        "filterValues": [search_url_params.get("pets", "0")],
+                    },
+                    {
+                        "filterName": "search_type",
+                        "filterValues": [
+                            search_url_params.get("search_type", "AUTOSUGGEST")
+                        ],
+                    },
+                ],
+                "maxMapItems": 9999,
+            },
+            "isLeanTreatment": False,
+        },
         "extensions": {
             "persistedQuery": {
                 "version": 1,
-                "sha256Hash": "d4d9503616dc72ab220ed8dcf17f166816dccb2593e7b4625c91c3fce3a3b3d6",
-            },
-        },
-        "variables": {
-            "includeMapResults": True,
-            "isLeanTreatment": False,
-            "staysMapSearchRequestV2": {
-                "cursor": cursor,
-                "requestedPageType": "STAYS_SEARCH",
-                "metadataOnly": False,
-                "source": "structured_search_input_header",
-                "searchType": "user_map_move",
-                "treatmentFlags": treament,
-                "rawParams": rawParams,
-            },
-            "staysSearchRequest": {
-                "cursor": cursor,
-                "maxMapItems": 9999,
-                "requestedPageType": "STAYS_SEARCH",
-                "metadataOnly": False,
-                "source": "structured_search_input_header",
-                "searchType": "user_map_move",
-                "treatmentFlags": treament,
-                "rawParams": rawParams,
-            },
+                "sha256Hash": "385c60ba2599dad1c62355032d8bbc09d826ae11660be78b16e09eba49c5c605",
+            }
         },
     }
     headers = {
